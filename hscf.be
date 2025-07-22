@@ -2,7 +2,7 @@
 
 Description: Berry script
        Date: 20250226
-   Modified: 20250626
+   Modified: 20250709
      Author: Andreas Delleske
     Company: https://www.dellekom.de
      Target: Waveshare ESP32S3-Relay-6CH
@@ -42,16 +42,16 @@ WLED device: https://www.gledopto.eu/gledopto-gl-dr-009wl-hutschienen-controller
 
 # ----- Configuration section -----
 
-# Relay hardwareGPIOs:
+# Relay hardware GPIOs:
      RELAYS = [1, 2, 41, 42, 45, 46]
 RELAYLABELS = ["Lüfter Südwest", "Lüfter Südost", "Lüfter Nordost", "Lüfter Nordwest", "Pumpen", "Reserve"]
 
-# URLs to change LED presets:
-   WLED_OFF = "http://192.168.138.51/?"
-  WLED_IDLE = "http://192.168.138.51/?"
-  WLED_PLAY = "http://192.168.138.51/?"
- WLED_STORM = "http://192.168.138.51/?"
- WLED_ALARM = "http://192.168.138.51/?"
+# WLED commends to set presets of the LED commander
+   WLED_URL = "http://192.168.22.126/json/state"
+   WLED_PS1 = '{"on":"true","bri":128,"ps":1}'
+   WLED_PS2 = '{"on":"true","bri":128,"ps":2}'
+   WLED_PS3 = '{"on":"true","bri":128,"ps":3}'
+   WLED_PS4 = '{"on":"true","bri":128,"ps":4}'
 
 # Switch numbers:
      FAN_SW = 0 # Switch / relay 1
@@ -62,17 +62,18 @@ RELAYLABELS = ["Lüfter Südwest", "Lüfter Südost", "Lüfter Nordost", "Lüfte
       SPARE = 5 # Switch / relay 6
 
 # Settings
-     SLEEPCYCLES = 100
-
-# Timings      
+     SLEEPCYCLES = 100  
         PLAYTIME = 180000 # 3 minutes
 
+# Schedules - Use CET, not CEST
     PLAYSCHEDULE = {
-       'start':'7:30', 
-       'end':'10:00'
+       'start':'6:30', 
+       'end':'20:00'
     }
 
            DEBUG = true
+
+print('   booting hscf.be')
 
 # ---- Do not change below this line ----
 import math
@@ -100,7 +101,6 @@ var light_yellow = {'power':true, 'rgb':'FFFF00', 'bri':128}
 var light_off = {'power':false, 'rgb':'000000', 'bri':128}
 var light_white = {'power':true, 'rgb':'FFFFFF', 'bri':128}
 
-
 # Initialization
 tasmota.set_power(FAN_SW, OFF) # Channel 1
 tasmota.set_power(FAN_SO, OFF) # Channel 2
@@ -115,19 +115,20 @@ def nextrandomstep(duration, randomduration)
     return tasmota.millis() + duration + math.rand() % randomduration
 end    
 
-def httpget(url)
+def httppost(url, action)
     var wc = webclient()
     wc.begin(url) 
-    var wcstat = wc.GET()
-    print("GET return: " + str(wcstat))
+    var wcstat = wc.POST(action)
+    print("POST return: " + str(wcstat))
     var response = wc.get_string()
-    print("GET response: " + response)
+    print("POST response: " + response)
     wc.close()
     return response
 end
 
 light.set(light_blue)
 print("  light: blue")
+#httppost(WLED_URL, WLED_PS1)
 
 # Get the starting and ending minutes of the schedule
 
@@ -139,10 +140,9 @@ var tomin = int(to[0]) * 60 + int(to[1])
 def mainloop()
     var sensors = json.load(tasmota.read_sensors())
 
-    # Night / Idle: Waiting for light
-    # -------------------------------
+    # Night / Idle: Waiting for schedule
+    # ----------------------------------
     if state == 0
-        # Wait for schedule to start
         var l = tasmota.rtc()['local']
         var t = tasmota.time_dump(l)
         var sfmin = t['hour'] * 60 + t['min']
@@ -154,19 +154,19 @@ def mainloop()
         end
         if schedule
             state = 1
-            print('   Schedule: ON')
+            print(string.format('  Schedule ON at: %i minutes', sfmin))
             if DEBUG 
                 print("State 0 to 1: Good Morning")
             end
             print("  light: green")
             light.set(light_green)
-            httpget("http://192.168.22.126/json/state")
+#            httppost(WLED_URL, WLED_PS2)
         end
     end
     # Day / Wating: Waiting for end of schedule
     # ------------------------------------------
     if state == 1
-        # Wait for schedule to end
+        # Wait for schedule to end or key pressed
         var l = tasmota.rtc()['local']
         var t = tasmota.time_dump(l)
         var sfmin = t['hour']*60+t['min']
@@ -177,7 +177,7 @@ def mainloop()
             end
         end
         if schedule == false
-            print('   Schedule: OFF')
+            print(string.format('  Schedule OFF at: %i minutes', sfmin))
             state = 0 # To sleep
             if DEBUG
                 print("State 1 to 0: Yawn")
@@ -185,6 +185,7 @@ def mainloop()
             tasmota.set_power(PUMPS, OFF)
             print("  light: blue")
             light.set(light_blue)
+#            httppost(WLED_URL, WLED_PS1)
         else
             state = 2
             r = math.rand() % 2
@@ -197,11 +198,11 @@ def mainloop()
             tasmota.set_power(first_left_fan, ON)
             print("  light: yellow")
             light.set(light_yellow)
+#            httppost(WLED_URL, WLED_PS3)
         end
     end
-    # Play: Start first left fan
-    # --------------------------
-    # =>
+    # Play: First left fan started
+    # ----------------------------
     if state == 2
         # Is playtime up?
         if playtimer < tasmota.millis()
@@ -233,9 +234,8 @@ def mainloop()
         end
 
     end
-    # Start other left fan
-    # --------------------
-    # => =>
+    # Second left fan started
+    # -----------------------
     if state == 3
         if steptimer == 0
             steptimer = nextrandomstep(15000, 2000)
@@ -253,9 +253,8 @@ def mainloop()
             end
         end
     end
-    # Stop first left fan
-    # -------------------
-    # =>
+    # First left fan stopped
+    # ----------------------
     if state == 4      
         if steptimer == 0
             steptimer = nextrandomstep(3000, 2000)
@@ -271,9 +270,8 @@ def mainloop()
             end
         end
     end
-    # Stop other left fan
-    # -------------------
-    #
+    # Second left fan stopped
+    # -----------------------
     if state == 5
         if steptimer == 0
             steptimer = nextrandomstep(15000, 2000)
@@ -291,9 +289,8 @@ def mainloop()
             end
         end
     end
-    # Start other right fan
-    # ---------------------
-    # <=
+    # First right fan started
+    # -----------------------
     if state == 6
         if steptimer == 0
             steptimer = nextrandomstep(3000, 2000)
@@ -308,8 +305,8 @@ def mainloop()
             end
         end
     end
-    # Stop first right fan
-    # --------------------
+    # Second right fan started
+    # ------------------------
     if state == 7
         if steptimer == 0
             steptimer = nextrandomstep(5000, 2000)
@@ -327,9 +324,8 @@ def mainloop()
             end
         end
     end
-    # Stop other right fan
-    # -------------------
-    # =>
+    # First right fan stopped
+    # -----------------------
     if state == 8
         if steptimer == 0
             steptimer = nextrandomstep(15000, 2000)
@@ -344,9 +340,25 @@ def mainloop()
             end
         end
     end
+    # Second right fan stopped
+    # ------------------------
+    if state == 9
+        if steptimer == 0
+            steptimer = nextrandomstep(15000, 2000)
+        else
+            if steptimer < tasmota.millis()
+                steptimer = 0
+                state = 10
+                if DEBUG
+                    print("State 9 to 10: Wait if cycle ended")
+                end
+                tasmota.set_power(second_right_fan, OFF)
+            end
+        end
+    end
     # Wait, then wait for playtime to end
     # -------------
-    if state == 9
+    if state == 10
         if steptimer == 0
             steptimer = nextrandomstep(5000, 2000)
         else
@@ -359,15 +371,16 @@ def mainloop()
                     state = 1
                     playtimer = 0
                     if DEBUG
-                        print("State 9 to 1: End play")
+                        print("State 10 to 1: End play")
                     end
                     tasmota.set_power(PUMPS, OFF)
                     print("  light: green")
                     light.set(light_green)
+#                    httppost(WLED_URL, WLED_PS2)
                 else 
                     state = 2
                     if DEBUG
-                        print("State 9 to 2: Continue play")
+                        print("State 10 to 2: Continue play")
                     end
                 end
             end
