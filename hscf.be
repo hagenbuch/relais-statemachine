@@ -2,7 +2,7 @@
 
 Description: Berry script
        Date: 20250226
-   Modified: 20250709
+   Modified: 20250723
      Author: Andreas Delleske
     Company: https://www.dellekom.de
      Target: Waveshare ESP32S3-Relay-6CH
@@ -15,12 +15,12 @@ Description: Berry script
              "GPIO":[1,224,225,1,1,1,1,1,1,1,1,1,1,1,1,1,1,9408,9440,1,1,
              480,0,0,0,0,0,1376,1,1,226,227,1,1,228,229,1,1],
              "FLAG":0,"BASE":1}
-    Version: 14.5.0
+    Version: 15.0.1
    Language: Berry script
   Device IP: 192.168.138.24
 WLED device: https://www.gledopto.eu/gledopto-gl-dr-009wl-hutschienen-controller
  Vendor URL: https://www.gledopto.eu/gledopto-gl-dr-009wl-hutschienen-controller
-       Cost: 24,99 EUR
+       Cost: 24,99 EUR (2025)
    Software: WLED
     Version: 0.15.0
         URL: https://kno.wled.ge/
@@ -30,30 +30,26 @@ WLED device: https://www.gledopto.eu/gledopto-gl-dr-009wl-hutschienen-controller
   Called by: autoexec.be
     Purpose: Main loop with state machine:
              
-             Turns ventilators and a water pump on an odd randomly to simulate 
-             weather in a landscape model with a model lake
-
-             RGB LED and RS485 port are available!
-
-             With an additional "hat", two luminosity sensors are connected via I2C
-             so the logic run only some minutes after activation
+             0 Idle: Waiting for timer schedule
+             1 Ready: Ready to take button presses
+             2 Run: Button pressed, timers are activated 
 
  -------------------------------------------------------#
-
 # ----- Configuration section -----
 
 # Relay hardware GPIOs:
      RELAYS = [1, 2, 41, 42, 45, 46]
 RELAYLABELS = ["Lüfter Südwest", "Lüfter Südost", "Lüfter Nordost", "Lüfter Nordwest", "Pumpen", "Reserve"]
+    BUTTONS = ["D4", "D5", "D6", "D7"]
+ BUTTONCLRS = ["red", "yellow", "green", "blue"]
+       LEDS = [6, 7, 8, 9]
+       FANS = [0, 1, 2, 3]
 
 # WLED commends to set presets of the LED commander
-   WLED_URL = "http://192.168.22.126/json/state"
-   WLED_PS1 = '{"on":"true","bri":128,"ps":1}'
-   WLED_PS2 = '{"on":"true","bri":128,"ps":2}'
-   WLED_PS3 = '{"on":"true","bri":128,"ps":3}'
-   WLED_PS4 = '{"on":"true","bri":128,"ps":4}'
+   WLED_URL = "http://192.168.13.133/json/state"
+   WLED_JSON = '{"on":true,"ps":%i}'
 
-# Switch numbers:
+# Relay numbers:
      FAN_SW = 0 # Switch / relay 1
      FAN_SO = 1
      FAN_NO = 2
@@ -61,19 +57,21 @@ RELAYLABELS = ["Lüfter Südwest", "Lüfter Südost", "Lüfter Nordost", "Lüfte
       PUMPS = 4
       SPARE = 5 # Switch / relay 6
 
+# PDF8547 digital interface extension
+# I2C address: 0x20
+# Name: PCF8574-1
+
 # Settings
-     SLEEPCYCLES = 100  
         PLAYTIME = 180000 # 3 minutes
+      BUTTONTIME = 30000 # 10 seconds
 
 # Schedules - Use CET, not CEST
     PLAYSCHEDULE = {
-       'start':'6:30', 
-       'end':'20:00'
+       'start':'6:00', 
+       'end':'21:00'
     }
 
-           DEBUG = true
-
-print('   booting hscf.be')
+DEBUG = true
 
 # ---- Do not change below this line ----
 import math
@@ -84,15 +82,7 @@ var ON = true
 var OFF = false
 
 var state = 0
-var sleepcounter = 0
 var playtimer = 0
-var steptimer = 0
-var first_left_fan = 0
-var first_right_fan = 0
-var second_left_fan = 0
-var second_right_fan = 0
-var r = 0
-var ra = 0
 
 var light_red = {'power':true, 'rgb':'FF0000', 'bri':128}
 var light_blue = {'power':true, 'rgb':'0000FF', 'bri':128}
@@ -100,6 +90,10 @@ var light_green = {'power':true, 'rgb':'00FF00', 'bri':128}
 var light_yellow = {'power':true, 'rgb':'FFFF00', 'bri':128}
 var light_off = {'power':false, 'rgb':'000000', 'bri':128}
 var light_white = {'power':true, 'rgb':'FFFFFF', 'bri':128}
+
+var buttonstate = [1, 1, 1, 1, 1]     # inverted, 0 = active
+var buttonlaststate = [1, 1, 1, 1, 1] # inverted, 0 = active
+var timermillis = [0, 0, 0, 0, 0]
 
 # Initialization
 tasmota.set_power(FAN_SW, OFF) # Channel 1
@@ -109,16 +103,20 @@ tasmota.set_power(FAN_NW, OFF) # Channel 4
 tasmota.set_power(PUMPS, OFF) # Channel 5
 tasmota.set_power(SPARE, OFF) # Channel 6, unused
 
-def nextrandomstep(duration, randomduration)
-    assert(duration > 0, 'duration must be greater 0')
-    assert(randomduration > 0, 'randomduration must be greater 0')
-    return tasmota.millis() + duration + math.rand() % randomduration
-end    
+def dash()
+    for i:6..9
+        tasmota.set_power(i, ON)
+        tasmota.set_power(i, OFF)
+    end
+end
 
-def httppost(url, action)
+dash()
+
+def httppost(url, json_payload, i)
     var wc = webclient()
-    wc.begin(url) 
-    var wcstat = wc.POST(action)
+    wc.begin(url)
+    wc.add_header("Content-Type", "application/json")  # Set JSON content type
+    var wcstat = wc.POST(string.format(json_payload, i))  # Send POST with payload
     print("POST return: " + str(wcstat))
     var response = wc.get_string()
     print("POST response: " + response)
@@ -126,9 +124,11 @@ def httppost(url, action)
     return response
 end
 
-light.set(light_blue)
-print("  light: blue")
-#httppost(WLED_URL, WLED_PS1)
+def nextrandomstep(duration, randomduration)
+    assert(duration > 0, 'duration must be greater 0')
+    assert(randomduration > 0, 'randomduration must be greater 0')
+    return tasmota.millis() + duration + math.rand() % randomduration
+end    
 
 # Get the starting and ending minutes of the schedule
 
@@ -137,256 +137,75 @@ var frommin = int(from[0]) * 60 + int(from[1])
 var to = string.split(PLAYSCHEDULE['end'], ':')
 var tomin = int(to[0]) * 60 + int(to[1])
 
+
 def mainloop()
     var sensors = json.load(tasmota.read_sensors())
+    var inputs = sensors['PCF8574-1']
+    var trigger = false
 
-    # Night / Idle: Waiting for schedule
-    # ----------------------------------
-    if state == 0
-        var l = tasmota.rtc()['local']
-        var t = tasmota.time_dump(l)
-        var sfmin = t['hour'] * 60 + t['min']
-        var schedule = false
-        if sfmin > frommin
-            if sfmin < tomin
-                schedule = true
-            end
-        end
-        if schedule
-            state = 1
-            print(string.format('  Schedule ON at: %i minutes', sfmin))
-            if DEBUG 
-                print("State 0 to 1: Good Morning")
-            end
-            print("  light: green")
-            light.set(light_green)
-#            httppost(WLED_URL, WLED_PS2)
+    var l = tasmota.rtc()['local']
+    var t = tasmota.time_dump(l)
+    var sfmin = t['hour'] * 60 + t['min']
+    var enable = false
+    if sfmin > frommin
+        if sfmin < tomin
+            enable = true
         end
     end
-    # Day / Wating: Waiting for end of schedule
-    # ------------------------------------------
-    if state == 1
-        # Wait for schedule to end or key pressed
-        var l = tasmota.rtc()['local']
-        var t = tasmota.time_dump(l)
-        var sfmin = t['hour']*60+t['min']
-        var schedule = false
-        if sfmin > frommin
-            if sfmin < tomin
-                schedule = true
+
+    for i:0..3
+        var buttonaddr = BUTTONS[i] 
+        buttonstate[i] = inputs[buttonaddr]
+
+        if buttonstate[i] != buttonlaststate[i]
+            # button edge detection:
+            if buttonstate[i] == 0
+                # button has been pressed:
+                if timermillis[i] == 0
+                    # start timer:
+                    if enable 
+                        trigger = true
+                        timermillis[i] = tasmota.millis() + BUTTONTIME
+                        tasmota.set_power(LEDS[i], ON)
+                        tasmota.set_power(FANS[i], ON)
+                        httppost(WLED_URL, WLED_JSON, i + 1)
+                        print(string.format('     Button %s %s: ON', buttonaddr, BUTTONCLRS[i]))
+                    else
+                        dash()
+                    end
+                else 
+                    # stop timer:
+                    timermillis[i] = 0
+                    tasmota.set_power(LEDS[i], OFF)
+                    tasmota.set_power(FANS[i], OFF)
+                    print(string.format('     Button %s %s: OFF', buttonaddr, BUTTONCLRS[i]))
+                end
+            end
+            buttonlaststate[i] = buttonstate[i]
+        end
+        if timermillis[i] != 0
+            if timermillis[i] < tasmota.millis()
+                timermillis[i] = 0
+                tasmota.set_power(LEDS[i], OFF)
+                tasmota.set_power(FANS[i], OFF)
+                httppost(WLED_URL, WLED_JSON, 5)
+                print(string.format('     Timeout %s %s: OFF', buttonaddr, BUTTONCLRS[i]))
             end
         end
-        if schedule == false
-            print(string.format('  Schedule OFF at: %i minutes', sfmin))
-            state = 0 # To sleep
-            if DEBUG
-                print("State 1 to 0: Yawn")
-            end
-            tasmota.set_power(PUMPS, OFF)
-            print("  light: blue")
-            light.set(light_blue)
-#            httppost(WLED_URL, WLED_PS1)
-        else
-            state = 2
-            r = math.rand() % 2
-            first_left_fan = r
-            second_left_fan = 1 - r
-            if DEBUG
-                print("State 1 to 2: start first left fan")
-            end
-            playtimer = tasmota.millis() + PLAYTIME
-            tasmota.set_power(first_left_fan, ON)
-            print("  light: yellow")
-            light.set(light_yellow)
-#            httppost(WLED_URL, WLED_PS3)
-        end
+    end # for
+    if trigger
+        playtimer = tasmota.millis() + PLAYTIME
+        tasmota.set_power(PUMPS, ON)
     end
-    # Play: First left fan started
-    # ----------------------------
-    if state == 2
-        # Is playtime up?
+    if playtimer != 0
         if playtimer < tasmota.millis()
             playtimer = 0
-            # Playtime is up!
-            state = 1
-            if DEBUG
-                print("State 2 to 1: Enough play!")
-            end
-            tasmota.set_power(FAN_SW, OFF) # Channel 1
-            tasmota.set_power(FAN_SO, OFF) # Channel 2
-            tasmota.set_power(FAN_NO, OFF) # Channel 3
-            tasmota.set_power(FAN_NW, OFF) # Channel 4
-            tasmota.set_power(PUMPS, OFF) # Channel 5
+            tasmota.set_power(PUMPS, OFF)
+            httppost(WLED_URL, WLED_JSON, 6)
         end
-     
-        # Wait for random time:
-        if steptimer == 0
-            steptimer = nextrandomstep(3000, 2000)
-        else
-            if steptimer < tasmota.millis()
-                steptimer = 0
-                state = 3
-                if DEBUG
-                    print("State 2 to 3: Start second left fan")
-                end
-                tasmota.set_power(second_left_fan, ON)
-            end
-        end
+    end
 
-    end
-    # Second left fan started
-    # -----------------------
-    if state == 3
-        if steptimer == 0
-            steptimer = nextrandomstep(15000, 2000)
-        else
-            if steptimer < tasmota.millis()
-                steptimer = 0
-                state = 4
-                r = math.rand() % 2
-                first_left_fan = r
-                second_left_fan = 1 - r
-                if DEBUG
-                    print("State 3 to 4: Stop first left fan")
-                end
-                tasmota.set_power(first_left_fan, OFF)
-            end
-        end
-    end
-    # First left fan stopped
-    # ----------------------
-    if state == 4      
-        if steptimer == 0
-            steptimer = nextrandomstep(3000, 2000)
-        else
-            if steptimer < tasmota.millis()
-                steptimer = 0
-                state = 5
-                if DEBUG
-                    print("State 4 to 5: Stop second left fan")
-                end 
-                tasmota.set_power(second_left_fan, OFF)
-                tasmota.set_power(PUMPS, ON)
-            end
-        end
-    end
-    # Second left fan stopped
-    # -----------------------
-    if state == 5
-        if steptimer == 0
-            steptimer = nextrandomstep(15000, 2000)
-        else
-            if steptimer < tasmota.millis()
-                steptimer = 0
-                state = 6
-                r = math.rand() % 2
-                first_right_fan = 2 + r
-                second_right_fan = 2 + (1 - r)
-                if DEBUG
-                    print("State 5 to 6: Start first right fan")
-                end
-                tasmota.set_power(first_right_fan, ON)
-            end
-        end
-    end
-    # First right fan started
-    # -----------------------
-    if state == 6
-        if steptimer == 0
-            steptimer = nextrandomstep(3000, 2000)
-        else
-            if steptimer < tasmota.millis()
-                steptimer = 0
-                state = 7
-                if DEBUG
-                    print("State 6 to 7: Start second right fan")
-                end
-                tasmota.set_power(second_right_fan, ON)
-            end
-        end
-    end
-    # Second right fan started
-    # ------------------------
-    if state == 7
-        if steptimer == 0
-            steptimer = nextrandomstep(5000, 2000)
-        else
-            if steptimer < tasmota.millis()
-                steptimer = 0
-                state = 8
-                r = math.rand() % 2
-                first_right_fan = 2 + r
-                second_right_fan = 2 + (1 - r)
-                if DEBUG
-                    print("State 7 to 8: Stop first right fan")
-                end
-                tasmota.set_power(first_right_fan, OFF)
-            end
-        end
-    end
-    # First right fan stopped
-    # -----------------------
-    if state == 8
-        if steptimer == 0
-            steptimer = nextrandomstep(15000, 2000)
-        else
-            if steptimer < tasmota.millis()
-                steptimer = 0
-                state = 9
-                if DEBUG
-                    print("State 8 to 9: Stop second right fan")
-                end
-                tasmota.set_power(second_right_fan, OFF)
-            end
-        end
-    end
-    # Second right fan stopped
-    # ------------------------
-    if state == 9
-        if steptimer == 0
-            steptimer = nextrandomstep(15000, 2000)
-        else
-            if steptimer < tasmota.millis()
-                steptimer = 0
-                state = 10
-                if DEBUG
-                    print("State 9 to 10: Wait if cycle ended")
-                end
-                tasmota.set_power(second_right_fan, OFF)
-            end
-        end
-    end
-    # Wait, then wait for playtime to end
-    # -------------
-    if state == 10
-        if steptimer == 0
-            steptimer = nextrandomstep(5000, 2000)
-        else
-            if steptimer < tasmota.millis()
-                steptimer = 0
-                if DEBUG
-                    print(string.format('  Remaining playtime: %i s', (playtimer - tasmota.millis()) / 1000))
-                end    
-                if playtimer < tasmota.millis()
-                    state = 1
-                    playtimer = 0
-                    if DEBUG
-                        print("State 10 to 1: End play")
-                    end
-                    tasmota.set_power(PUMPS, OFF)
-                    print("  light: green")
-                    light.set(light_green)
-#                    httppost(WLED_URL, WLED_PS2)
-                else 
-                    state = 2
-                    if DEBUG
-                        print("State 10 to 2: Continue play")
-                    end
-                end
-            end
-        end
-    end
-end
+end # main loop
 
 def set_timer_modulo(delay, f, id)
   # Every delay milliseconds, we'll set a time when to call function f: 
@@ -395,4 +214,4 @@ def set_timer_modulo(delay, f, id)
 end
 
 # Enable the clock:
-set_timer_modulo(500, mainloop)
+set_timer_modulo(200, mainloop)
