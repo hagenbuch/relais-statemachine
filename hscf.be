@@ -2,7 +2,7 @@
 
 Description: Berry script
        Date: 20250226
-   Modified: 20250723
+   Modified: 20250724
      Author: Andreas Delleske
     Company: https://www.dellekom.de
      Target: Waveshare ESP32S3-Relay-6CH
@@ -17,22 +17,19 @@ Description: Berry script
              "FLAG":0,"BASE":1}
     Version: 15.0.1
    Language: Berry script
-  Device IP: 192.168.138.24
+  Device IP: <redacted>
 WLED device: https://www.gledopto.eu/gledopto-gl-dr-009wl-hutschienen-controller
  Vendor URL: https://www.gledopto.eu/gledopto-gl-dr-009wl-hutschienen-controller
        Cost: 24,99 EUR (2025)
    Software: WLED
     Version: 0.15.0
         URL: https://kno.wled.ge/
-  Device IP: 192.168.138.51
+  Device IP: <redacted>>
 
    Filename: hscf.be
   Called by: autoexec.be
-    Purpose: Main loop with state machine:
-             
-             0 Idle: Waiting for timer schedule
-             1 Ready: Ready to take button presses
-             2 Run: Button pressed, timers are activated 
+    Purpose: Main loop with four buttons, four LEDS, five timers
+             Able to control a WLED device via HTTP POST requests
 
  -------------------------------------------------------#
 # ----- Configuration section -----
@@ -46,7 +43,7 @@ RELAYLABELS = ["Lüfter Südwest", "Lüfter Südost", "Lüfter Nordost", "Lüfte
        FANS = [0, 1, 2, 3]
 
 # WLED commends to set presets of the LED commander
-   WLED_URL = "http://192.168.13.133/json/state"
+   WLED_URL = "http://<redacted>/json/state"
    WLED_JSON = '{"on":true,"ps":%i}'
 
 # Relay numbers:
@@ -104,6 +101,7 @@ tasmota.set_power(PUMPS, OFF) # Channel 5
 tasmota.set_power(SPARE, OFF) # Channel 6, unused
 
 def dash()
+    # Just makes all LEDS flash up in sequence.
     for i:6..9
         tasmota.set_power(i, ON)
         tasmota.set_power(i, OFF)
@@ -113,6 +111,7 @@ end
 dash()
 
 def httppost(url, json_payload, i)
+    # Posts a command to a WLED instance, using JSON over HTTP POST:
     var wc = webclient()
     wc.begin(url)
     wc.add_header("Content-Type", "application/json")  # Set JSON content type
@@ -124,14 +123,7 @@ def httppost(url, json_payload, i)
     return response
 end
 
-def nextrandomstep(duration, randomduration)
-    assert(duration > 0, 'duration must be greater 0')
-    assert(randomduration > 0, 'randomduration must be greater 0')
-    return tasmota.millis() + duration + math.rand() % randomduration
-end    
-
-# Get the starting and ending minutes of the schedule
-
+# Extract the starting and ending minutes of the schedule
 var from = string.split(PLAYSCHEDULE['start'], ':')
 var frommin = int(from[0]) * 60 + int(from[1])
 var to = string.split(PLAYSCHEDULE['end'], ':')
@@ -154,6 +146,7 @@ def mainloop()
     end
 
     for i:0..3
+        # Iterate through the four buttons and LEDs:
         var buttonaddr = BUTTONS[i] 
         buttonstate[i] = inputs[buttonaddr]
 
